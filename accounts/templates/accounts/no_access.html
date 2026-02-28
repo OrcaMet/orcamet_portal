@@ -1,0 +1,18 @@
+{% extends "orcamet_portal/base.html" %}
+
+{% block title %}Access Denied — OrcaMet Portal{% endblock %}
+
+{% block content %}
+<div class="error-page">
+    <h1>Access Not Configured</h1>
+    <p>
+        Hello {{ name|default:"there" }}. You've successfully authenticated
+        {% if email %}as <strong>{{ email }}</strong>{% endif %},
+        but your account hasn't been set up in the OrcaMet portal yet.
+    </p>
+    <p>
+        Please contact your OrcaMet account manager to have your portal access configured.
+    </p>
+    <a href="{% url 'accounts:index' %}" class="btn btn-primary">Return to Home</a>
+</div>
+{% endblock %}

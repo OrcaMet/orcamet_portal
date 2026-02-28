@@ -1,0 +1,37 @@
+{% extends "orcamet_portal/base.html" %}
+{% load static %}
+
+{% block title %}OrcaMet — Client Portal{% endblock %}
+
+{% block content %}
+<div class="landing">
+    <div class="landing-hero">
+        <h1>OrcaMet Client Portal</h1>
+        <p class="landing-tagline">
+            Automated risk management forecasts for rope access operations.
+            Multi-model ensemble weather intelligence, delivered twice daily.
+        </p>
+        <a href="{% url 'accounts:login' %}" class="btn btn-primary btn-large">
+            Log In to Your Portal
+        </a>
+    </div>
+
+    <div class="landing-features">
+        <div class="feature-card">
+            <div class="feature-icon">📊</div>
+            <h3>Site-Specific Forecasts</h3>
+            <p>3-day forecasts with hourly detail for each of your work sites, powered by multi-model ensemble analysis.</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">🗺️</div>
+            <h3>UK Risk Map</h3>
+            <p>See job cancellation probability across the entire UK at a glance, updated twice daily.</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">⚡</div>
+            <h3>Automated Updates</h3>
+            <p>Fresh forecasts generated at 06:00 and 14:00 UTC using UKV, ECMWF, ICON-EU, and ARPEGE models.</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

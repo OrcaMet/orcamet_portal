@@ -1,0 +1,10 @@
+{% extends "orcamet_portal/base.html" %} {% block title %}Login Error — OrcaMet Portal{% endblock %} {% block content %}
+Login Error
+Something went wrong during authentication. Please try again.
+
+{% if error %}
+Detail: {{ error }}
+{% endif %}
+Try Again Home
+
+{% endblock %}
