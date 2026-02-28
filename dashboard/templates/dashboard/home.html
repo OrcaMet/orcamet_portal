@@ -1,0 +1,89 @@
+{% extends "orcamet_portal/base.html" %}
+
+{% block title %}Dashboard — OrcaMet Portal{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <div class="dashboard-header">
+        <h1>Welcome, {{ user.first_name|default:user.username }}</h1>
+        <p class="dashboard-role">
+            {% if user.is_superadmin %}
+                OrcaMet Administrator — All clients
+            {% elif user.client %}
+                {{ user.client.name }}
+                {% if user.is_client_admin %}(Admin){% endif %}
+            {% endif %}
+        </p>
+    </div>
+
+    <div class="dashboard-stats">
+        <div class="stat-card">
+            <div class="stat-number">{{ site_count }}</div>
+            <div class="stat-label">Active Sites</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">—</div>
+            <div class="stat-label">Latest Forecast</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">—</div>
+            <div class="stat-label">Alerts</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Your Sites</h2>
+
+        {% if sites %}
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Site Name</th>
+                    {% if user.is_superadmin %}<th>Client</th>{% endif %}
+                    <th>Postcode</th>
+                    <th>Exposure</th>
+                    <th>Status</th>
+                    <th>Latest Risk</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for site in sites %}
+                <tr>
+                    <td><strong>{{ site.name }}</strong></td>
+                    {% if user.is_superadmin %}<td>{{ site.client.name }}</td>{% endif %}
+                    <td>{{ site.postcode }}</td>
+                    <td>{{ site.get_exposure_display }}</td>
+                    <td>
+                        {% if site.job_complete %}
+                            <span class="badge badge-muted">Complete</span>
+                        {% else %}
+                            <span class="badge badge-active">Active</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <span class="badge badge-pending">Awaiting forecast</span>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <p>No active sites found.</p>
+            {% if user.is_superadmin %}
+            <p>Head to the <a href="/admin/sites/site/add/">Admin panel</a> to add sites.</p>
+            {% else %}
+            <p>Contact your OrcaMet account manager to have sites added.</p>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="section">
+        <h2>UK Risk Map</h2>
+        <div class="empty-state">
+            <p>Risk map generation will be available in Phase 2.</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
