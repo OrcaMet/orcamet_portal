@@ -1,0 +1,511 @@
+{% extends "orcamet_portal/base.html" %}
+{% load static %}
+
+{% block title %}{{ site.name }} — OrcaMet Portal{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/3.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="site-detail">
+    <!-- Breadcrumb -->
+    <div class="breadcrumb">
+        <a href="{% url 'dashboard:home' %}">Dashboard</a>
+        <span class="breadcrumb-sep">›</span>
+        <span>{{ site.name }}</span>
+    </div>
+
+    <!-- Site Header -->
+    <div class="site-header">
+        <div class="site-header-info">
+            <h1>{{ site.name }}</h1>
+            <p class="site-meta">
+                {{ site.client.name }} · {{ site.postcode }} · {{ site.get_exposure_display }}
+                {% if site.elevation %} · {{ site.elevation }}m ASL{% endif %}
+            </p>
+        </div>
+        {% if forecast_days %}
+        <div class="site-header-status">
+            {% with run=forecast_days.0 %}
+                {% if run.recommendation == "GO" %}
+                    <div class="status-badge status-go">
+                        <span class="status-icon">🟢</span>
+                        <span class="status-text">GO</span>
+                    </div>
+                {% elif run.recommendation == "CAUTION" %}
+                    <div class="status-badge status-caution">
+                        <span class="status-icon">🟡</span>
+                        <span class="status-text">CAUTION</span>
+                    </div>
+                {% elif run.recommendation == "CANCEL" %}
+                    <div class="status-badge status-cancel">
+                        <span class="status-icon">🔴</span>
+                        <span class="status-text">CANCEL</span>
+                    </div>
+                {% endif %}
+                <div class="status-detail">
+                    Peak risk: {{ run.peak_risk|floatformat:0 }}% · Updated {{ run.generated_at|date:"H:i d M" }} UTC
+                </div>
+            {% endwith %}
+        </div>
+        {% endif %}
+    </div>
+
+    {% if forecast_days %}
+    <!-- Day Summary Cards -->
+    <div class="forecast-day-cards">
+        {% for run in forecast_days %}
+        <div class="day-card {% if run.recommendation == 'GO' %}day-go{% elif run.recommendation == 'CAUTION' %}day-caution{% else %}day-cancel{% endif %}">
+            <div class="day-card-date">
+                {% if run.forecast_date == today %}
+                    <span class="day-label">Today</span>
+                {% else %}
+                    <span class="day-label">{{ run.forecast_date|date:"l" }}</span>
+                {% endif %}
+                <span class="day-full-date">{{ run.forecast_date|date:"d M Y" }}</span>
+            </div>
+            <div class="day-card-recommendation">
+                {% if run.recommendation == "GO" %}🟢{% elif run.recommendation == "CAUTION" %}🟡{% else %}🔴{% endif %}
+                {{ run.recommendation }}
+            </div>
+            <div class="day-card-stats">
+                <div class="day-stat">
+                    <span class="day-stat-label">Peak Risk</span>
+                    <span class="day-stat-value">{{ run.peak_risk|floatformat:0 }}%</span>
+                </div>
+                <div class="day-stat">
+                    <span class="day-stat-label">Wind</span>
+                    <span class="day-stat-value">{{ run.peak_wind|floatformat:1 }} m/s</span>
+                </div>
+                <div class="day-stat">
+                    <span class="day-stat-label">Gusts</span>
+                    <span class="day-stat-value">{{ run.peak_gust|floatformat:1 }} m/s</span>
+                </div>
+                <div class="day-stat">
+                    <span class="day-stat-label">Precip</span>
+                    <span class="day-stat-value">{{ run.peak_precip|floatformat:1 }} mm/h</span>
+                </div>
+                <div class="day-stat">
+                    <span class="day-stat-label">Min Temp</span>
+                    <span class="day-stat-value">{{ run.min_temp|floatformat:1 }}°C</span>
+                </div>
+            </div>
+            <div class="day-card-models">
+                Models: {{ run.models_used|join:", " }}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Charts -->
+    <div class="section">
+        <h2>Hourly Forecast</h2>
+        <div class="chart-tabs">
+            <button class="chart-tab active" data-chart="risk">Risk Score</button>
+            <button class="chart-tab" data-chart="wind">Wind & Gusts</button>
+            <button class="chart-tab" data-chart="precip">Precipitation</button>
+            <button class="chart-tab" data-chart="temp">Temperature</button>
+        </div>
+
+        <div class="chart-container" id="chart-risk-container">
+            <canvas id="chart-risk"></canvas>
+        </div>
+        <div class="chart-container" id="chart-wind-container" style="display:none;">
+            <canvas id="chart-wind"></canvas>
+        </div>
+        <div class="chart-container" id="chart-precip-container" style="display:none;">
+            <canvas id="chart-precip"></canvas>
+        </div>
+        <div class="chart-container" id="chart-temp-container" style="display:none;">
+            <canvas id="chart-temp"></canvas>
+        </div>
+    </div>
+
+    <!-- Hourly Table -->
+    <div class="section">
+        <h2>Hourly Breakdown <span class="section-hint">(Work hours 07:00–18:00 highlighted)</span></h2>
+        <div class="table-responsive">
+        <table class="data-table hourly-table" id="hourly-table">
+            <thead>
+                <tr>
+                    <th>Time (UTC)</th>
+                    <th>Wind (m/s)</th>
+                    <th>Gust (m/s)</th>
+                    <th>Precip (mm/h)</th>
+                    <th>Temp (°C)</th>
+                    <th>Risk</th>
+                </tr>
+            </thead>
+            <tbody id="hourly-tbody">
+                <tr><td colspan="6" class="loading-cell">Loading forecast data…</td></tr>
+            </tbody>
+        </table>
+        </div>
+    </div>
+
+    {% if threshold %}
+    <!-- Threshold Reference -->
+    <div class="section">
+        <h2>Active Thresholds</h2>
+        <div class="threshold-grid">
+            <div class="threshold-item">
+                <span class="threshold-var">Mean Wind</span>
+                <span class="threshold-vals">
+                    <span class="threshold-caution">⚠️ {{ threshold.wind_mean_caution }} m/s</span>
+                    <span class="threshold-cancel">🛑 {{ threshold.wind_mean_cancel }} m/s</span>
+                </span>
+            </div>
+            <div class="threshold-item">
+                <span class="threshold-var">Gusts</span>
+                <span class="threshold-vals">
+                    <span class="threshold-caution">⚠️ {{ threshold.gust_caution }} m/s</span>
+                    <span class="threshold-cancel">🛑 {{ threshold.gust_cancel }} m/s</span>
+                </span>
+            </div>
+            <div class="threshold-item">
+                <span class="threshold-var">Precipitation</span>
+                <span class="threshold-vals">
+                    <span class="threshold-caution">⚠️ {{ threshold.precip_caution }} mm/h</span>
+                    <span class="threshold-cancel">🛑 {{ threshold.precip_cancel }} mm/h</span>
+                </span>
+            </div>
+            <div class="threshold-item">
+                <span class="threshold-var">Min Temperature</span>
+                <span class="threshold-vals">
+                    <span class="threshold-caution">⚠️ {{ threshold.temp_min_caution }}°C</span>
+                    <span class="threshold-cancel">🛑 {{ threshold.temp_min_cancel }}°C</span>
+                </span>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% else %}
+    <!-- No Forecasts Yet -->
+    <div class="empty-state" style="margin-top: 2rem;">
+        <h3>No Forecasts Available</h3>
+        <p>Forecasts for this site haven't been generated yet.</p>
+        <p>Forecasts run automatically at 06:00 and 14:00 UTC daily.</p>
+        {% if user.is_superadmin %}
+        <p style="margin-top: 1rem;">
+            <a href="/admin/sites/site/{{ site.pk }}/change/" class="btn btn-primary">
+                Trigger from Admin
+            </a>
+        </p>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+{% if forecast_days %}
+<script>
+(function() {
+    const API_URL = '{% url "dashboard:chart_data" site.pk %}';
+    const WORK_START = 7;
+    const WORK_END = 18;
+
+    // Colour palette
+    const COLOURS = {
+        risk:    { line: '#ef4444', fill: 'rgba(239,68,68,0.12)' },
+        wind:    { line: '#0ea5e9', fill: 'rgba(14,165,233,0.12)' },
+        gust:    { line: '#f59e0b', fill: 'rgba(245,158,11,0.12)' },
+        precip:  { line: '#3b82f6', fill: 'rgba(59,130,246,0.12)' },
+        temp:    { line: '#22c55e', fill: 'rgba(34,197,94,0.12)' },
+        grid:    'rgba(148,163,184,0.15)',
+        text:    '#94a3b8',
+        cautionLine: 'rgba(245,158,11,0.5)',
+        cancelLine:  'rgba(239,68,68,0.5)',
+    };
+
+    const charts = {};
+
+    // =============================
+    // FETCH DATA & BUILD CHARTS
+    // =============================
+
+    fetch(API_URL)
+        .then(r => r.json())
+        .then(data => {
+            if (!data.hourly || data.hourly.length === 0) {
+                document.getElementById('hourly-tbody').innerHTML =
+                    '<tr><td colspan="6" class="loading-cell">No hourly data available.</td></tr>';
+                return;
+            }
+
+            const labels = data.hourly.map(h => new Date(h.time));
+            const thresholds = data.thresholds;
+
+            buildRiskChart(labels, data.hourly);
+            buildWindChart(labels, data.hourly, thresholds);
+            buildPrecipChart(labels, data.hourly, thresholds);
+            buildTempChart(labels, data.hourly, thresholds);
+            buildTable(data.hourly);
+        })
+        .catch(err => {
+            console.error('Failed to load forecast data:', err);
+            document.getElementById('hourly-tbody').innerHTML =
+                '<tr><td colspan="6" class="loading-cell">Failed to load forecast data.</td></tr>';
+        });
+
+    // =============================
+    // CHART BUILDERS
+    // =============================
+
+    function commonScales(yLabel) {
+        return {
+            x: {
+                type: 'time',
+                time: { unit: 'hour', displayFormats: { hour: 'HH:mm' }, tooltipFormat: 'EEE dd MMM HH:mm' },
+                grid: { color: COLOURS.grid },
+                ticks: { color: COLOURS.text, maxRotation: 0, autoSkipPadding: 20 },
+            },
+            y: {
+                title: { display: true, text: yLabel, color: COLOURS.text },
+                grid: { color: COLOURS.grid },
+                ticks: { color: COLOURS.text },
+                beginAtZero: true,
+            }
+        };
+    }
+
+    function thresholdAnnotations(cautionVal, cancelVal, label) {
+        return {
+            annotation: {
+                annotations: {
+                    caution: {
+                        type: 'line', yMin: cautionVal, yMax: cautionVal,
+                        borderColor: COLOURS.cautionLine, borderWidth: 2, borderDash: [6, 4],
+                        label: { display: true, content: label + ' Caution', position: 'start',
+                                 backgroundColor: 'rgba(245,158,11,0.8)', font: { size: 10 } }
+                    },
+                    cancel: {
+                        type: 'line', yMin: cancelVal, yMax: cancelVal,
+                        borderColor: COLOURS.cancelLine, borderWidth: 2, borderDash: [6, 4],
+                        label: { display: true, content: label + ' Cancel', position: 'start',
+                                 backgroundColor: 'rgba(239,68,68,0.8)', font: { size: 10 } }
+                    }
+                }
+            }
+        };
+    }
+
+    function buildRiskChart(labels, hourly) {
+        const ctx = document.getElementById('chart-risk').getContext('2d');
+        charts.risk = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Risk Score (%)',
+                    data: hourly.map(h => h.risk),
+                    borderColor: COLOURS.risk.line,
+                    backgroundColor: COLOURS.risk.fill,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    pointHitRadius: 8,
+                    borderWidth: 2,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: COLOURS.text } },
+                    tooltip: { mode: 'index', intersect: false },
+                },
+                scales: {
+                    ...commonScales('Risk (%)'),
+                    y: { ...commonScales('Risk (%)').y, max: 100 }
+                },
+            }
+        });
+    }
+
+    function buildWindChart(labels, hourly, thresholds) {
+        const ctx = document.getElementById('chart-wind').getContext('2d');
+        charts.wind = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'Wind Speed (m/s)',
+                        data: hourly.map(h => h.wind_speed),
+                        borderColor: COLOURS.wind.line,
+                        backgroundColor: COLOURS.wind.fill,
+                        fill: true, tension: 0.3, pointRadius: 0, pointHitRadius: 8, borderWidth: 2,
+                    },
+                    {
+                        label: 'Gusts (m/s)',
+                        data: hourly.map(h => h.wind_gusts),
+                        borderColor: COLOURS.gust.line,
+                        backgroundColor: COLOURS.gust.fill,
+                        fill: false, tension: 0.3, pointRadius: 0, pointHitRadius: 8,
+                        borderWidth: 2, borderDash: [4, 2],
+                    },
+                    {
+                        label: 'Wind Caution (' + thresholds.wind_mean_caution + ' m/s)',
+                        data: hourly.map(() => thresholds.wind_mean_caution),
+                        borderColor: COLOURS.cautionLine, borderWidth: 1, borderDash: [6, 4],
+                        pointRadius: 0, fill: false,
+                    },
+                    {
+                        label: 'Wind Cancel (' + thresholds.wind_mean_cancel + ' m/s)',
+                        data: hourly.map(() => thresholds.wind_mean_cancel),
+                        borderColor: COLOURS.cancelLine, borderWidth: 1, borderDash: [6, 4],
+                        pointRadius: 0, fill: false,
+                    },
+                    {
+                        label: 'Gust Cancel (' + thresholds.gust_cancel + ' m/s)',
+                        data: hourly.map(() => thresholds.gust_cancel),
+                        borderColor: 'rgba(239,68,68,0.3)', borderWidth: 1, borderDash: [2, 4],
+                        pointRadius: 0, fill: false,
+                    },
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: COLOURS.text } },
+                    tooltip: { mode: 'index', intersect: false },
+                },
+                scales: commonScales('Speed (m/s)'),
+            }
+        });
+    }
+
+    function buildPrecipChart(labels, hourly, thresholds) {
+        const ctx = document.getElementById('chart-precip').getContext('2d');
+        charts.precip = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'Precipitation (mm/h)',
+                        data: hourly.map(h => h.precipitation),
+                        backgroundColor: hourly.map(h =>
+                            h.precipitation >= thresholds.precip_cancel ? 'rgba(239,68,68,0.7)' :
+                            h.precipitation >= thresholds.precip_caution ? 'rgba(245,158,11,0.7)' :
+                            'rgba(59,130,246,0.7)'
+                        ),
+                        borderRadius: 2,
+                    },
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: COLOURS.text } },
+                    tooltip: { mode: 'index', intersect: false },
+                },
+                scales: commonScales('Precipitation (mm/h)'),
+            }
+        });
+    }
+
+    function buildTempChart(labels, hourly, thresholds) {
+        const ctx = document.getElementById('chart-temp').getContext('2d');
+        charts.temp = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'Temperature (°C)',
+                        data: hourly.map(h => h.temperature),
+                        borderColor: COLOURS.temp.line,
+                        backgroundColor: COLOURS.temp.fill,
+                        fill: true, tension: 0.3, pointRadius: 0, pointHitRadius: 8, borderWidth: 2,
+                    },
+                    {
+                        label: 'Temp Caution (' + thresholds.temp_min_caution + '°C)',
+                        data: hourly.map(() => thresholds.temp_min_caution),
+                        borderColor: COLOURS.cautionLine, borderWidth: 1, borderDash: [6, 4],
+                        pointRadius: 0, fill: false,
+                    },
+                    {
+                        label: 'Temp Cancel (' + thresholds.temp_min_cancel + '°C)',
+                        data: hourly.map(() => thresholds.temp_min_cancel),
+                        borderColor: COLOURS.cancelLine, borderWidth: 1, borderDash: [6, 4],
+                        pointRadius: 0, fill: false,
+                    },
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { color: COLOURS.text } },
+                    tooltip: { mode: 'index', intersect: false },
+                },
+                scales: {
+                    ...commonScales('Temperature (°C)'),
+                    y: { ...commonScales('Temperature (°C)').y, beginAtZero: false }
+                },
+            }
+        });
+    }
+
+    // =============================
+    // HOURLY TABLE
+    // =============================
+
+    function buildTable(hourly) {
+        const tbody = document.getElementById('hourly-tbody');
+        let html = '';
+
+        for (const h of hourly) {
+            const d = new Date(h.time);
+            const hour = d.getUTCHours();
+            const isWork = (hour >= WORK_START && hour <= WORK_END);
+            const dayStr = d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+            const timeStr = String(hour).padStart(2, '0') + ':00';
+
+            let riskClass = 'risk-cell-low';
+            if (h.risk >= 50) riskClass = 'risk-cell-high';
+            else if (h.risk >= 20) riskClass = 'risk-cell-medium';
+
+            html += '<tr class="' + (isWork ? 'work-hour' : 'off-hour') + '">' +
+                '<td>' + dayStr + ' ' + timeStr + '</td>' +
+                '<td>' + h.wind_speed.toFixed(1) + ' <span class="spread">±' + h.wind_spread.toFixed(1) + '</span></td>' +
+                '<td>' + h.wind_gusts.toFixed(1) + ' <span class="spread">±' + h.gust_spread.toFixed(1) + '</span></td>' +
+                '<td>' + h.precipitation.toFixed(1) + '</td>' +
+                '<td>' + h.temperature.toFixed(1) + '</td>' +
+                '<td class="' + riskClass + '">' + h.risk.toFixed(0) + '%</td>' +
+                '</tr>';
+        }
+
+        tbody.innerHTML = html;
+    }
+
+    // =============================
+    // TAB SWITCHING
+    // =============================
+
+    document.querySelectorAll('.chart-tab').forEach(tab => {
+        tab.addEventListener('click', function() {
+            document.querySelectorAll('.chart-tab').forEach(t => t.classList.remove('active'));
+            this.classList.add('active');
+
+            const chartName = this.dataset.chart;
+            document.querySelectorAll('.chart-container').forEach(c => c.style.display = 'none');
+            document.getElementById('chart-' + chartName + '-container').style.display = 'block';
+
+            // Resize chart on show
+            if (charts[chartName]) charts[chartName].resize();
+        });
+    });
+
+})();
+</script>
+{% endif %}
+{% endblock %}
