@@ -1,6 +1,7 @@
 # Django core
 django~=5.1
 gunicorn
+uvicorn
 
 # Database
 psycopg2-binary
