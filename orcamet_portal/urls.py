@@ -1,14 +1,10 @@
-"""
-OrcaMet Portal — URL Configuration
-"""
+from django.urls import path
+from . import views
 
-from django.contrib import admin
-from django.urls import path, include
+app_name = "dashboard"
 
 urlpatterns = [
-    path("admin/", admin.site.urls),
-    path("", include("accounts.urls")),
-    path("dashboard/", include("dashboard.urls")),
-    path("sites/", include("sites.urls")),
-    path("forecasts/", include("forecasts.urls")),
+    path("", views.home, name="home"),
+    path("site/<int:site_id>/", views.site_detail, name="site_detail"),
+    path("site/<int:site_id>/chart-data/", views.forecast_chart_data, name="chart_data"),
 ]

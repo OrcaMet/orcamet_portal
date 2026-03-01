@@ -30,12 +30,54 @@ services:
       - key: PYTHON_VERSION
         value: "3.12.3"
       # Auth0 — set these manually in the Render dashboard
-      # after creating your Auth0 application
       # - key: AUTH0_DOMAIN
       #   value: your-tenant.uk.auth0.com
       # - key: AUTH0_CLIENT_ID
       #   value: your-client-id
       # - key: AUTH0_CLIENT_SECRET
       #   value: your-client-secret
+      # - key: OPENMETEO_API_KEY
+      #   value: your-api-key
+
+  # ============================================================
+  # CRON JOBS — Automated Forecast Generation
+  # ============================================================
+  # Runs at 06:00 and 14:00 UTC daily, ensuring there is always
+  # a fresh forecast available in the portal.
+  # ============================================================
+
+  - type: cron
+    name: orcamet-forecast-morning
+    runtime: python
+    schedule: "0 6 * * *"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python manage.py run_forecasts"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: orcamet-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: "3.12.3"
+      # - key: OPENMETEO_API_KEY
+      #   value: your-api-key
+
+  - type: cron
+    name: orcamet-forecast-afternoon
+    runtime: python
+    schedule: "0 14 * * *"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python manage.py run_forecasts"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: orcamet-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: "3.12.3"
       # - key: OPENMETEO_API_KEY
       #   value: your-api-key
