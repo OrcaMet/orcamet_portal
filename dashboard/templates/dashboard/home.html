@@ -22,12 +22,28 @@
             <div class="stat-label">Active Sites</div>
         </div>
         <div class="stat-card">
-            <div class="stat-number">—</div>
-            <div class="stat-label">Latest Forecast</div>
+            <div class="stat-number">{{ forecast_count }}</div>
+            <div class="stat-label">Sites with Forecasts</div>
+        </div>
+        <div class="stat-card {% if alert_count > 0 %}stat-card-alert{% endif %}">
+            <div class="stat-number">{{ alert_count }}</div>
+            <div class="stat-label">Active Alerts</div>
         </div>
         <div class="stat-card">
-            <div class="stat-number">—</div>
-            <div class="stat-label">Alerts</div>
+            <div class="stat-number stat-time">
+                {% if latest_forecast_time %}
+                    {{ latest_forecast_time|date:"H:i" }}
+                {% else %}
+                    —
+                {% endif %}
+            </div>
+            <div class="stat-label">
+                {% if latest_forecast_time %}
+                    Last Update {{ latest_forecast_time|date:"d M" }}
+                {% else %}
+                    No Forecasts Yet
+                {% endif %}
+            </div>
         </div>
     </div>
 
@@ -35,6 +51,7 @@
         <h2>Your Sites</h2>
 
         {% if sites %}
+        <div class="table-responsive">
         <table class="data-table">
             <thead>
                 <tr>
@@ -43,13 +60,16 @@
                     <th>Postcode</th>
                     <th>Exposure</th>
                     <th>Status</th>
-                    <th>Latest Risk</th>
+                    <th>Today's Risk</th>
+                    <th>Recommendation</th>
+                    <th>Peak Wind</th>
+                    <th>Peak Gust</th>
                 </tr>
             </thead>
             <tbody>
                 {% for site in sites %}
-                <tr>
-                    <td><strong>{{ site.name }}</strong></td>
+                <tr class="site-row" onclick="window.location='{% url 'dashboard:site_detail' site.pk %}'">
+                    <td><strong><a href="{% url 'dashboard:site_detail' site.pk %}">{{ site.name }}</a></strong></td>
                     {% if user.is_superadmin %}<td>{{ site.client.name }}</td>{% endif %}
                     <td>{{ site.postcode }}</td>
                     <td>{{ site.get_exposure_display }}</td>
@@ -61,12 +81,50 @@
                         {% endif %}
                     </td>
                     <td>
-                        <span class="badge badge-pending">Awaiting forecast</span>
+                        {% if site.latest_run %}
+                            {% with risk=site.latest_run.peak_risk %}
+                                {% if risk < 20 %}
+                                    <span class="risk-bar risk-low" style="--risk-width: {{ risk }}%">{{ risk|floatformat:0 }}%</span>
+                                {% elif risk < 50 %}
+                                    <span class="risk-bar risk-medium" style="--risk-width: {{ risk }}%">{{ risk|floatformat:0 }}%</span>
+                                {% else %}
+                                    <span class="risk-bar risk-high" style="--risk-width: {{ risk }}%">{{ risk|floatformat:0 }}%</span>
+                                {% endif %}
+                            {% endwith %}
+                        {% else %}
+                            <span class="badge badge-pending">Awaiting</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if site.latest_run %}
+                            {% if site.latest_run.recommendation == "GO" %}
+                                <span class="badge badge-active">🟢 GO</span>
+                            {% elif site.latest_run.recommendation == "CAUTION" %}
+                                <span class="badge badge-caution">🟡 CAUTION</span>
+                            {% elif site.latest_run.recommendation == "CANCEL" %}
+                                <span class="badge badge-cancel">🔴 CANCEL</span>
+                            {% else %}
+                                <span class="badge badge-muted">{{ site.latest_run.recommendation }}</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="badge badge-muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if site.latest_run and site.latest_run.peak_wind is not None %}
+                            {{ site.latest_run.peak_wind|floatformat:1 }} m/s
+                        {% else %}—{% endif %}
+                    </td>
+                    <td>
+                        {% if site.latest_run and site.latest_run.peak_gust is not None %}
+                            {{ site.latest_run.peak_gust|floatformat:1 }} m/s
+                        {% else %}—{% endif %}
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+        </div>
         {% else %}
         <div class="empty-state">
             <p>No active sites found.</p>
@@ -79,11 +137,15 @@
         {% endif %}
     </div>
 
+    {% if user.is_superadmin %}
     <div class="section">
-        <h2>UK Risk Map</h2>
-        <div class="empty-state">
-            <p>Risk map generation will be available in Phase 2.</p>
+        <h2>Admin Actions</h2>
+        <div class="admin-actions">
+            <a href="/admin/" class="btn btn-primary">Django Admin</a>
+            <a href="/admin/sites/site/add/" class="btn btn-secondary">Add Site</a>
+            <a href="/admin/sites/client/add/" class="btn btn-secondary">Add Client</a>
         </div>
     </div>
+    {% endif %}
 </div>
 {% endblock %}
