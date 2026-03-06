@@ -627,24 +627,28 @@ def map_risk_grid_json(request):
 # Contour map views (server-rendered CloughTocher2D interpolation)
 # ================================================================
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 @login_required(login_url="/login/")
 def map_contour_image(request):
     """
     Serve a contour map as a transparent PNG image.
 
-    First checks for pre-cached images (from generate_contour_cache).
-    Falls back to on-the-fly CloughTocher2D rendering if no cache exists.
+    For TIMESTAMP requests:
+      - Serves pre-cached image from CachedContourImage (instant)
+      - Returns 404 if no cache exists (run generate_contour_cache)
+      - Does NOT fall back to on-the-fly rendering (prevents hangs)
+
+    For PEAK requests (no timestamp):
+      - Renders on-the-fly (one-off, acceptable latency)
 
     Query params:
-        timestamp (str): ISO timestamp (e.g. '2026-03-06T12:00:00+00:00').
-                         If omitted, returns peak map.
-        var (str):       Variable — 'risk', 'wind', 'gust', 'precip', 'temp'.
-                         Default: 'risk'.
-        resolution (int): Interpolation resolution (for fallback only).
-                         Default: 300.
-
-    Returns PNG image directly.
+        timestamp (str): ISO timestamp. Required for hourly frames.
+        var (str):       'risk', 'wind', 'gust', 'precip', 'temp'. Default: 'risk'.
+        resolution (int): Interpolation resolution. Default: 300.
     """
     from forecasts.models import (
         UKRiskGridRun,
@@ -669,34 +673,47 @@ def map_contour_image(request):
             "No grid data available", status=404, content_type="text/plain"
         )
 
-    # ---- Try cached image first ----
+    # ---- TIMESTAMP REQUEST: serve from cache only ----
     if requested_ts:
         from django.utils.dateparse import parse_datetime
 
         ts = parse_datetime(requested_ts)
-        if ts:
-            cached = (
-                CachedContourImage.objects.filter(
-                    run=grid_run,
-                    timestamp=ts,
-                    variable=var_name,
-                )
-                .first()
+        if not ts:
+            return HttpResponse(
+                "Invalid timestamp", status=400, content_type="text/plain"
             )
-            if cached and cached.image_data:
-                # Serve cached PNG directly — instant!
-                response = HttpResponse(
-                    bytes(cached.image_data),
-                    content_type="image/png",
-                )
-                response["Cache-Control"] = "public, max-age=3600"
-                return response
 
-    # ---- Fallback: on-the-fly rendering ----
-    try:
-        from forecasts.engine.map_interpolation import (
-            render_contour_to_bytes,
+        # Look up cached image
+        cached = CachedContourImage.objects.filter(
+            run=grid_run,
+            timestamp=ts,
+            variable=var_name,
+        ).first()
+
+        if cached and cached.image_data:
+            # Serve cached PNG — instant!
+            response = HttpResponse(
+                bytes(cached.image_data),
+                content_type="image/png",
+            )
+            response["Cache-Control"] = "public, max-age=3600"
+            return response
+
+        # No cache — return 404 instead of attempting on-the-fly render
+        # (which can hang due to coastline download or matplotlib overhead)
+        logger.warning(
+            f"No cached contour for {var_name} @ {requested_ts}. "
+            f"Run: python manage.py generate_contour_cache"
         )
+        return HttpResponse(
+            "Contour not cached. Run generate_contour_cache.",
+            status=404,
+            content_type="text/plain",
+        )
+
+    # ---- PEAK REQUEST (no timestamp): on-the-fly is OK ----
+    try:
+        from forecasts.engine.map_interpolation import render_contour_to_bytes
     except ImportError as e:
         return HttpResponse(
             f"Map dependencies not installed: {e}",
@@ -704,9 +721,6 @@ def map_contour_image(request):
             content_type="text/plain",
         )
 
-    points_qs = UKRiskGridPoint.objects.filter(run=grid_run)
-
-    # Variable field mapping
     FIELD_MAP = {
         "wind": "wind_speed",
         "gust": "wind_gusts",
@@ -716,53 +730,37 @@ def map_contour_image(request):
     }
     field_name = FIELD_MAP.get(var_name, "risk")
 
-    if requested_ts:
-        from django.utils.dateparse import parse_datetime
+    points_qs = UKRiskGridPoint.objects.filter(run=grid_run)
 
-        ts = parse_datetime(requested_ts)
-        if not ts:
-            return HttpResponse(
-                "Invalid timestamp", status=400, content_type="text/plain"
-            )
-        points_qs = points_qs.filter(timestamp=ts)
-
-        if not points_qs.exists():
-            return HttpResponse(
-                "No data for this timestamp",
-                status=404,
-                content_type="text/plain",
-            )
-
-        lats = np.array(list(points_qs.values_list("latitude", flat=True)))
-        lons = np.array(list(points_qs.values_list("longitude", flat=True)))
-        values = np.array(
-            list(points_qs.values_list(field_name, flat=True))
+    if var_name == "temp":
+        agg = points_qs.values("latitude", "longitude").annotate(
+            val=Min(field_name)
         )
     else:
-        # Peak/min across all hours
-        if var_name == "temp":
-            agg = points_qs.values("latitude", "longitude").annotate(
-                val=Min(field_name)
-            )
-        else:
-            agg = points_qs.values("latitude", "longitude").annotate(
-                val=Max(field_name)
-            )
-        lats = np.array([p["latitude"] for p in agg])
-        lons = np.array([p["longitude"] for p in agg])
-        values = np.array([p["val"] for p in agg])
+        agg = points_qs.values("latitude", "longitude").annotate(
+            val=Max(field_name)
+        )
+
+    lats = np.array([p["latitude"] for p in agg])
+    lons = np.array([p["longitude"] for p in agg])
+    values = np.array([p["val"] for p in agg])
 
     if len(lats) < 4:
         return HttpResponse(
             "Not enough data points", status=404, content_type="text/plain"
         )
 
-    # Render on-the-fly
-    png_bytes = render_contour_to_bytes(
-        lats, lons, values,
-        variable=var_name,
-        resolution=resolution,
-    )
+    try:
+        png_bytes = render_contour_to_bytes(
+            lats, lons, values,
+            variable=var_name,
+            resolution=resolution,
+        )
+    except Exception as e:
+        logger.error(f"Contour rendering failed: {e}")
+        return HttpResponse(
+            f"Rendering failed: {e}", status=500, content_type="text/plain"
+        )
 
     response = HttpResponse(png_bytes, content_type="image/png")
     response["Cache-Control"] = "public, max-age=300"
