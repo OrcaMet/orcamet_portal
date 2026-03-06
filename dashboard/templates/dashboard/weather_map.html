@@ -183,6 +183,9 @@
     // UK bounding box for the image overlay (must match map_interpolation.py)
     var UK_BOUNDS = [[49.9, -7.6], [58.7, 1.8]];
 
+    // Timeout for contour image loading (ms)
+    var IMAGE_TIMEOUT = 15000;
+
     // How many frames ahead to preload
     var PRELOAD_AHEAD = 6;
 
@@ -229,11 +232,12 @@
     }).addTo(map);
 
     /* ================================================================
-       CONTOUR IMAGE OVERLAY (with preloading)
+       CONTOUR IMAGE OVERLAY (with preloading + timeout)
        ================================================================ */
     var contourLayer = null;
-    var imageCache = {};  // URL -> HTMLImageElement (preloaded)
+    var imageCache = {};
     var hasServerCache = false;
+    var contourAvailable = true;
 
     function contourUrl(timestamp, varName) {
         var url = CONTOUR_URL + '?var=' + varName;
@@ -245,7 +249,8 @@
     }
 
     function preloadImage(url) {
-        if (imageCache[url]) return;  // Already loading or loaded
+        if (imageCache[url]) return;
+        imageCache[url] = 'loading';
         var img = new Image();
         img.crossOrigin = 'anonymous';
         img.onload = function() { imageCache[url] = img; };
@@ -254,12 +259,12 @@
     }
 
     function preloadAhead(idx, varName) {
-        // Preload the next N frames for smooth animation
         for (var i = 1; i <= PRELOAD_AHEAD; i++) {
             var fi = idx + i;
             if (fi >= gridTimestamps.length) fi -= gridTimestamps.length;
-            var url = contourUrl(gridTimestamps[fi], varName);
-            preloadImage(url);
+            if (fi < gridTimestamps.length) {
+                preloadImage(contourUrl(gridTimestamps[fi], varName));
+            }
         }
     }
 
@@ -275,27 +280,50 @@
         contourLayer.addTo(map);
     }
 
+    /**
+     * Load a contour image WITH TIMEOUT.
+     * Always resolves (never rejects) — the map loads regardless.
+     */
     function loadContourImage(timestamp, varName) {
+        if (!contourAvailable) return Promise.resolve();
+
         var url = contourUrl(timestamp, varName);
 
-        // If already cached in browser, show instantly
-        if (imageCache[url] && imageCache[url].complete) {
+        // If already fully cached, show instantly
+        var cached = imageCache[url];
+        if (cached && typeof cached === 'object' && cached.complete) {
             setContourOverlay(url);
             return Promise.resolve();
         }
 
         return new Promise(function(resolve) {
+            var resolved = false;
+
+            function finish() {
+                if (resolved) return;
+                resolved = true;
+                resolve();
+            }
+
+            // TIMEOUT: resolve anyway after IMAGE_TIMEOUT ms
+            var timer = setTimeout(function() {
+                console.warn('Contour image timed out (' + IMAGE_TIMEOUT + 'ms):', url);
+                finish();
+            }, IMAGE_TIMEOUT);
+
             var img = new Image();
             img.crossOrigin = 'anonymous';
             img.onload = function() {
+                clearTimeout(timer);
                 imageCache[url] = img;
                 setContourOverlay(url);
-                resolve();
+                finish();
             };
             img.onerror = function() {
+                clearTimeout(timer);
                 console.warn('Contour load failed:', url);
                 imageCache[url] = null;
-                resolve();
+                finish();
             };
             img.src = url;
         });
@@ -378,11 +406,19 @@
     var $bsub  = document.getElementById('bsub');
 
     /* ================================================================
-       DATA LOADING
+       DATA LOADING (with timeouts on fetch)
        ================================================================ */
+    function fetchWithTimeout(url, timeoutMs) {
+        return Promise.race([
+            fetch(url).then(function(r) { return r.json(); }),
+            new Promise(function(_, reject) {
+                setTimeout(function() { reject(new Error('Fetch timeout: ' + url)); }, timeoutMs);
+            })
+        ]);
+    }
+
     function loadTimestamps() {
-        return fetch(TS_URL)
-            .then(function(r) { return r.json(); })
+        return fetchWithTimeout(TS_URL, 10000)
             .then(function(d) {
                 if (d.available) {
                     gridTimestamps = d.timestamps || [];
@@ -399,15 +435,13 @@
     }
 
     function loadSites() {
-        return fetch(SITE_URL)
-            .then(function(r) { return r.json(); })
+        return fetchWithTimeout(SITE_URL, 10000)
             .then(function(d) { siteGJ = d; })
             .catch(function(e) { console.warn('sites:', e); });
     }
 
     function loadHourly() {
-        return fetch(HOUR_URL)
-            .then(function(r) { return r.json(); })
+        return fetchWithTimeout(HOUR_URL, 15000)
             .then(function(d) { hourlyD = d; })
             .catch(function(e) { console.warn('hourly:', e); });
     }
@@ -460,10 +494,10 @@
         $bsub.textContent = 'Hour ' + (curIdx + 1) + '/' + gridTimestamps.length;
         $rng.value = curIdx;
 
-        // Load the contour image using full timestamp
+        // Load the contour image using full ISO timestamp
         loadContourImage(ts, curVar);
 
-        // Preload upcoming frames for smooth playback
+        // Preload upcoming frames
         preloadAhead(curIdx, curVar);
 
         // Update site markers
@@ -534,7 +568,7 @@
             document.querySelectorAll('.pill').forEach(function(b) { b.classList.remove('on'); });
             this.classList.add('on');
             curVar = this.dataset.v;
-            imageCache = {};  // Clear cache when variable changes
+            imageCache = {};
             renderLgnd();
             renderFrame(curIdx);
         });
@@ -544,15 +578,21 @@
        PRELOAD ALL FRAMES (if server cache exists)
        ================================================================ */
     function preloadAllFrames(varName) {
-        // When server cache exists, aggressively preload all frames
-        // for buttery-smooth animation
         gridTimestamps.forEach(function(ts) {
             preloadImage(contourUrl(ts, varName));
         });
     }
 
     /* ================================================================
-       BOOT
+       DISMISS LOADING OVERLAY
+       ================================================================ */
+    function dismissLoading() {
+        document.getElementById('mfill').style.width = '100%';
+        document.getElementById('mload').classList.add('done');
+    }
+
+    /* ================================================================
+       BOOT — RESILIENT: map always loads, even if contour fails
        ================================================================ */
     renderLgnd();
     var $fill = document.getElementById('mfill');
@@ -560,6 +600,19 @@
 
     $fill.style.width = '30%';
     $txt.textContent = 'Loading map data…';
+
+    // *** SAFETY NET: always dismiss loading after 20s max ***
+    var bootTimeout = setTimeout(function() {
+        console.warn('Boot safety timeout reached — showing map without contour');
+        document.getElementById('gstatus').textContent = 'Loaded (contour still rendering…)';
+        if (gridTimestamps.length) {
+            $rng.max = gridTimestamps.length - 1;
+            renderFrame(0);
+        } else {
+            renderSites(0);
+        }
+        dismissLoading();
+    }, 20000);
 
     Promise.all([
         loadTimestamps(),
@@ -572,12 +625,11 @@
         if (gridTimestamps.length) {
             $rng.max = gridTimestamps.length - 1;
             $rng.value = 0;
-
-            // Load the first frame's contour image using full timestamp
+            // Load first frame — has built-in IMAGE_TIMEOUT
             return loadContourImage(gridTimestamps[0], curVar);
         }
     }).then(function() {
-        $fill.style.width = '100%';
+        clearTimeout(bootTimeout);
 
         var statusParts = [gridTimestamps.length + ' hours loaded'];
         if (hasServerCache) statusParts.push('(cached — instant playback)');
@@ -585,7 +637,6 @@
 
         renderFrame(0);
 
-        // If server cache exists, preload all frames for instant animation
         if (hasServerCache && gridTimestamps.length) {
             preloadAllFrames(curVar);
         }
@@ -600,10 +651,14 @@
             ], {maxZoom: 9});
         }
 
-        document.getElementById('mload').classList.add('done');
+        dismissLoading();
     }).catch(function(e) {
-        console.error('Boot fail:', e);
-        $txt.textContent = 'Failed to load map data';
+        console.error('Boot error:', e);
+        clearTimeout(bootTimeout);
+        // *** STILL show the map — just without contour overlay ***
+        document.getElementById('gstatus').textContent = 'Map loaded (contour unavailable)';
+        renderSites(0);
+        dismissLoading();
     });
 
     // Refresh site data every 5 mins
