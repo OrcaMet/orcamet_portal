@@ -5,19 +5,16 @@ Pre-renders contour map PNGs for every (timestamp × variable) combination
 from the latest risk grid run, storing them in the CachedContourImage model
 for instant map animation.
 
-Run after risk_grid completes:
-    python manage.py risk_grid && python manage.py generate_contour_cache
-
-Or configure as sequential cron jobs on Render:
-    1. python manage.py risk_grid
-    2. python manage.py generate_contour_cache
+MEMORY-SAFE: Flushes rendered images to the database after each variable
+and calls gc.collect() after every render to prevent matplotlib memory leaks.
 
 Usage:
     python manage.py generate_contour_cache                  # Latest run
-    python manage.py generate_contour_cache --resolution 300 # Custom res
-    python manage.py generate_contour_cache --variables risk wind gust
+    python manage.py generate_contour_cache --resolution 200 # Faster
+    python manage.py generate_contour_cache --variables risk wind
 """
 
+import gc
 import logging
 import time
 from datetime import datetime, timezone
@@ -33,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Variables to pre-render
 ALL_VARIABLES = ["risk", "wind", "gust", "precip", "temp"]
 
-# Map variable name -> model field + aggregation for peak maps
+# Map variable name -> model field
 VARIABLE_FIELD_MAP = {
     "risk": "risk",
     "wind": "wind_speed",
@@ -48,28 +45,20 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--resolution",
-            type=int,
-            default=300,
-            help="Interpolation resolution (default: 300)",
+            "--resolution", type=int, default=200,
+            help="Interpolation resolution (default: 200). Lower = faster + less memory.",
         )
         parser.add_argument(
-            "--variables",
-            nargs="+",
-            default=ALL_VARIABLES,
+            "--variables", nargs="+", default=ALL_VARIABLES,
             help=f"Variables to render (default: {' '.join(ALL_VARIABLES)})",
         )
         parser.add_argument(
-            "--run-id",
-            type=int,
-            default=None,
+            "--run-id", type=int, default=None,
             help="Specific UKRiskGridRun ID (default: latest successful)",
         )
         parser.add_argument(
-            "--dpi",
-            type=int,
-            default=150,
-            help="Image DPI (default: 150)",
+            "--dpi", type=int, default=100,
+            help="Image DPI (default: 100). Lower = less memory.",
         )
 
     def handle(self, *args, **options):
@@ -86,26 +75,20 @@ class Command(BaseCommand):
             try:
                 grid_run = UKRiskGridRun.objects.get(pk=run_id)
             except UKRiskGridRun.DoesNotExist:
-                self.stderr.write(
-                    self.style.ERROR(f"Grid run {run_id} not found")
-                )
+                self.stderr.write(self.style.ERROR(f"Grid run {run_id} not found"))
                 return
         else:
             grid_run = (
-                UKRiskGridRun.objects.filter(
-                    status=UKRiskGridRun.Status.SUCCESS
-                )
+                UKRiskGridRun.objects.filter(status=UKRiskGridRun.Status.SUCCESS)
                 .order_by("-generated_at")
                 .first()
             )
 
         if not grid_run:
-            self.stderr.write(
-                self.style.ERROR("No successful grid run found")
-            )
+            self.stderr.write(self.style.ERROR("No successful grid run found"))
             return
 
-        # Get all unique timestamps for this run
+        # Get all unique timestamps
         timestamps = list(
             UKRiskGridPoint.objects.filter(run=grid_run)
             .values_list("timestamp", flat=True)
@@ -114,11 +97,7 @@ class Command(BaseCommand):
         )
 
         if not timestamps:
-            self.stderr.write(
-                self.style.ERROR(
-                    f"No grid points found for run {grid_run.pk}"
-                )
-            )
+            self.stderr.write(self.style.ERROR(f"No grid points for run {grid_run.pk}"))
             return
 
         total_images = len(timestamps) * len(variables)
@@ -132,53 +111,39 @@ class Command(BaseCommand):
         )
 
         # Delete existing cache for this run
-        deleted_count, _ = CachedContourImage.objects.filter(
-            run=grid_run
-        ).delete()
+        deleted_count, _ = CachedContourImage.objects.filter(run=grid_run).delete()
         if deleted_count:
-            self.stdout.write(
-                f"  Cleared {deleted_count} existing cached images"
-            )
+            self.stdout.write(f"  Cleared {deleted_count} existing cached images")
 
-        # Pre-fetch all unique (lat, lon) coordinates for this run
-        # (same for every timestamp)
         start_time = time.time()
-        rendered = 0
-        failed = 0
-        cache_records = []
+        total_rendered = 0
+        total_failed = 0
 
+        # Process ONE VARIABLE AT A TIME, flushing to DB after each
         for var_idx, var_name in enumerate(variables):
             field_name = VARIABLE_FIELD_MAP.get(var_name, "risk")
 
             self.stdout.write(
-                f"\n  [{var_idx + 1}/{len(variables)}] "
-                f"Rendering {var_name}..."
+                f"\n  [{var_idx + 1}/{len(variables)}] Rendering {var_name}..."
             )
+
+            var_records = []
+            var_rendered = 0
+            var_failed = 0
 
             for ts_idx, timestamp in enumerate(timestamps):
                 try:
                     # Query grid points for this timestamp
                     points = UKRiskGridPoint.objects.filter(
-                        run=grid_run,
-                        timestamp=timestamp,
+                        run=grid_run, timestamp=timestamp,
                     )
 
-                    lats = np.array(
-                        list(points.values_list("latitude", flat=True))
-                    )
-                    lons = np.array(
-                        list(points.values_list("longitude", flat=True))
-                    )
-                    values = np.array(
-                        list(points.values_list(field_name, flat=True))
-                    )
+                    lats = np.array(list(points.values_list("latitude", flat=True)))
+                    lons = np.array(list(points.values_list("longitude", flat=True)))
+                    values = np.array(list(points.values_list(field_name, flat=True)))
 
                     if len(lats) < 4:
-                        logger.warning(
-                            f"Skipping {var_name} @ {timestamp}: "
-                            f"only {len(lats)} points"
-                        )
-                        failed += 1
+                        var_failed += 1
                         continue
 
                     # Render the contour image
@@ -189,66 +154,73 @@ class Command(BaseCommand):
                         dpi=dpi,
                     )
 
-                    cache_records.append(CachedContourImage(
+                    var_records.append(CachedContourImage(
                         run=grid_run,
                         timestamp=timestamp,
                         variable=var_name,
                         image_data=png_bytes,
                     ))
+                    var_rendered += 1
 
-                    rendered += 1
+                    # Force garbage collection every render to combat
+                    # matplotlib memory leaks
+                    gc.collect()
 
-                    # Progress
-                    if (ts_idx + 1) % 12 == 0 or ts_idx == len(timestamps) - 1:
+                    # Progress every 6 hours
+                    if (ts_idx + 1) % 6 == 0 or ts_idx == len(timestamps) - 1:
                         elapsed = time.time() - start_time
-                        total_done = rendered + failed
-                        rate = total_done / elapsed if elapsed > 0 else 0
-                        remaining = total_images - total_done
+                        done = total_rendered + total_failed + var_rendered + var_failed
+                        rate = done / elapsed if elapsed > 0 else 0
+                        remaining = total_images - done
                         eta = remaining / rate if rate > 0 else 0
                         self.stdout.write(
                             f"    {ts_idx + 1}/{len(timestamps)} hours — "
-                            f"{rendered} rendered, "
-                            f"{rate:.1f} img/s, ETA {eta:.0f}s"
+                            f"{var_rendered} OK, {var_failed} failed, "
+                            f"ETA {eta:.0f}s"
                         )
 
                 except Exception as e:
-                    logger.error(
-                        f"Failed to render {var_name} @ {timestamp}: {e}"
-                    )
-                    failed += 1
+                    logger.error(f"Failed to render {var_name} @ {timestamp}: {e}")
+                    self.stdout.write(self.style.WARNING(
+                        f"    ⚠ {var_name} @ hour {ts_idx}: {e}"
+                    ))
+                    var_failed += 1
+                    gc.collect()
 
-        # Bulk insert all cached images
-        if cache_records:
-            self.stdout.write(
-                f"\n  Storing {len(cache_records)} cached images..."
-            )
-            try:
-                # Insert in batches to avoid memory issues
-                batch_size = 50
-                for i in range(0, len(cache_records), batch_size):
-                    batch = cache_records[i:i + batch_size]
-                    CachedContourImage.objects.bulk_create(batch)
+            # FLUSH this variable's images to DB immediately
+            if var_records:
+                try:
+                    batch_size = 20
+                    for i in range(0, len(var_records), batch_size):
+                        batch = var_records[i:i + batch_size]
+                        CachedContourImage.objects.bulk_create(batch)
 
-                elapsed = time.time() - start_time
-                avg_size = sum(
-                    len(r.image_data) for r in cache_records
-                ) / len(cache_records)
+                    total_size_kb = sum(len(r.image_data) for r in var_records) / 1024
+                    self.stdout.write(self.style.SUCCESS(
+                        f"    ✓ {var_name}: {var_rendered} images stored "
+                        f"({total_size_kb:.0f} KB total)"
+                    ))
+                except Exception as e:
+                    logger.error(f"DB insert failed for {var_name}: {e}")
+                    self.stdout.write(self.style.ERROR(
+                        f"    ✗ DB insert failed for {var_name}: {e}"
+                    ))
+                    var_failed += var_rendered
+                    var_rendered = 0
 
-                self.stdout.write(self.style.SUCCESS(
-                    f"\n  ✓ Contour cache complete: "
-                    f"{len(cache_records)} images "
-                    f"({failed} failed) in {elapsed:.0f}s\n"
-                    f"  Average image size: {avg_size / 1024:.0f} KB\n"
-                    f"  Total cache size: "
-                    f"{sum(len(r.image_data) for r in cache_records) / 1024 / 1024:.1f} MB"
-                ))
+            total_rendered += var_rendered
+            total_failed += var_failed
 
-            except Exception as e:
-                logger.error(f"Bulk insert failed: {e}")
-                self.stderr.write(
-                    self.style.ERROR(f"  ✗ Storage failed: {e}")
-                )
+            # Free all references and force GC before next variable
+            del var_records
+            gc.collect()
+
+        # Final summary
+        elapsed = time.time() - start_time
+        if total_rendered > 0:
+            self.stdout.write(self.style.SUCCESS(
+                f"\n  ✓ Contour cache complete: {total_rendered} images "
+                f"({total_failed} failed) in {elapsed:.0f}s"
+            ))
         else:
-            self.stderr.write(
-                self.style.ERROR("  ✗ No images were rendered")
-            )
+            self.stderr.write(self.style.ERROR("  ✗ No images were rendered"))
