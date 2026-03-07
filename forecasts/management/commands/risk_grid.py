@@ -179,7 +179,7 @@ class Command(BaseCommand):
 
         # Determine which models cover which grid points
         model_points = {}
-        for model_name in GRID_CONFIG:
+        for model_name in GRID_MODELS:
             in_domain = [
                 pt for pt in grid_points
                 if is_in_domain(model_name, pt[0], pt[1])
